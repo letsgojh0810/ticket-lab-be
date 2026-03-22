@@ -10,20 +10,22 @@ import lombok.Getter;
 public class ReservationResponse {
     private boolean success;
     private String message;
-    private Long rank; // 대기 순번 (대기 중일 때만 포함)
+    private Long rank;
+    private Long reservationId;
 
-    // 성공 응답 정적 팩토리 메서드
     public static ReservationResponse ok(String message) {
-        return new ReservationResponse(true, message, null);
+        return new ReservationResponse(true, message, null, null);
     }
 
-    // 대기 응답 정적 팩토리 메서드
+    public static ReservationResponse reserved(Long reservationId) {
+        return new ReservationResponse(true, "좌석 선점 완료", null, reservationId);
+    }
+
     public static ReservationResponse waiting(Long rank) {
-        return new ReservationResponse(false, "현재 대기 중입니다.", rank);
+        return new ReservationResponse(false, "현재 대기 중입니다.", rank, null);
     }
 
-    // 실패 응답 정적 팩토리 메서드
     public static ReservationResponse fail(String message) {
-        return new ReservationResponse(false, message, null);
+        return new ReservationResponse(false, message, null, null);
     }
 }

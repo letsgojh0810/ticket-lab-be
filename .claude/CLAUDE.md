@@ -200,10 +200,10 @@ This approach decouples reservation processing from side effects (notifications,
 **ReservationEventConsumer** (`infrastructure/kafka/ReservationEventConsumer.java`)
 - Listens to `reservation-events` topic
 - Manual commit for at-least-once delivery guarantee
-- Processes events by type:
-  - `RESERVATION_SUCCESS`: Send confirmation, update statistics
-  - `RESERVATION_FAILED`: Log failure reasons, update failure metrics
-  - `RESERVATION_CANCELLED`: Process refunds, reopen seats
+- Processes events by type: `RESERVATION_SUCCESS`, `RESERVATION_FAILED`, `RESERVATION_CANCELLED`
+
+**NotificationConsumer** (`infrastructure/kafka/NotificationConsumer.java`)
+- Separate consumer for notification-specific handling on the same topic
 
 ### Kafka Integration Points
 
@@ -215,16 +215,36 @@ Event publishing happens at three points in `ReservationFacade`:
 
 ## API Endpoints
 
-**POST /reserve/{seatId}?userId={userId}**
-- Reserves a seat for a user
-- Returns: "SUCCESS", "FAIL: <reason>", or "ERROR: <message>"
-- Internally uses distributed lock + Redis cache + DB transaction + Kafka event
+**Queue (prerequisite before reserving)**
+- `POST /api/v1/queue/enter?userId={userId}` — Enter waiting queue; returns `READY` if already active, else `WAITING` with rank
+- `GET /api/v1/queue/status?userId={userId}` — Check queue status and active user count
+- `DELETE /api/v1/queue?userId={userId}` — Leave queue and release active slot
+
+**Seats (read-only)**
+- `GET /api/v1/seats` — All seats with real-time status (DB metadata + Redis state)
+- `GET /api/v1/seats/{seatId}` — Single seat
+- `GET /api/v1/seats/available` — Only available seats
+
+**Reservations**
+- `POST /api/v1/reservations/reserve` — Reserve a seat; body: `{ seatId, userId }`. Returns 200 on success, 409 on conflict, 403 if not an active queue user
+- `POST /api/v1/reservations/cancel` — Cancel reservation; body: `{ seatId, userId }`
+
+## Waiting Queue System
+
+Redis-based virtual waiting room limiting concurrent reservation processing:
+
+- **Data structures**: Sorted set (`ticket:waiting:queue`) stores waiting users by timestamp; individual TTL keys (`ticket:active:users:{userId}`) track active users
+- **Capacity**: Max 200 concurrent active users
+- **Scheduler**: `QueueScheduler` runs every 1s, promotes waiting → active up to capacity
+- **Active user TTL**: 5 minutes; after TTL expires the slot is freed automatically
+- **Reservation guard**: `ReservationFacade` checks `WaitingQueueService.isAllowed()` before proceeding — throws `IllegalStateException` (→ 403) if user is not active
 
 ## Important Notes
 
-- The system is designed for high-concurrency scenarios where multiple users attempt to reserve the same seat simultaneously
-- Redis state has a 5-minute TTL to prevent indefinite locks if reservation fails
-- Lock timeouts (1s wait, 2s hold) are tuned for performance - adjust based on load testing
+- **DataInitializer** creates 100 seats (`1번 좌석` → `100번 좌석`) on every application startup
+- **PaymentService** simulates 80% success rate (used in reservation flow for mock payment)
+- **SeatQueryService** composes DB metadata with Redis `state:seat:{seatId}` for real-time seat status
+- Redis state has a 5-minute TTL to prevent stale locks; lock timeouts are 1s wait / 2s hold
 - All infrastructure must be running via docker-compose before starting the application
 
 ### Kafka Considerations
@@ -233,5 +253,4 @@ Event publishing happens at three points in `ReservationFacade`:
 - **Manual commit mode**: Consumer commits only after successful processing to prevent message loss
 - **Partitioning**: Events for the same seat go to the same partition (preserves ordering)
 - **Error handling**: Failed event processing doesn't commit offset → message will be reprocessed
-- **Future enhancement**: Consider Dead Letter Queue (DLQ) for repeatedly failing messages
 - **Topic creation**: `reservation-events` topic must exist before first publish (auto-create enabled in Kafka config)

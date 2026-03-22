@@ -1,8 +1,6 @@
 package com.example.ticket.domain.reservation;
 
 import com.example.ticket.domain.event.ReservationEvent;
-import com.example.ticket.domain.reservation.Reservation;
-import com.example.ticket.domain.reservation.ReservationRepository;
 import com.example.ticket.domain.seat.Seat;
 import com.example.ticket.domain.seat.SeatRepository;
 import com.example.ticket.infrastructure.kafka.ReservationEventProducer;
@@ -13,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 @RequiredArgsConstructor
+@Transactional(readOnly = true)
 public class ReservationService {
 
     private final SeatRepository seatRepository;
@@ -20,30 +19,56 @@ public class ReservationService {
     private final RedisTemplate<String, String> redisTemplate;
     private final ReservationEventProducer reservationEventProducer;
 
+    /**
+     * 좌석 선점: Reservation을 HELD 상태로 저장
+     */
     @Transactional
-    public Reservation reserve(Long seatId, Long userId) {
+    public Reservation hold(Long seatId, Long userId) {
         Seat seat = seatRepository.findById(seatId)
                 .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 좌석입니다."));
 
-        // 엔티티 내부 로직으로 좌석 예약 상태 변경
         seat.reserve();
 
-        // 예약 기록 저장
         Reservation reservation = new Reservation(userId, seatId);
         return reservationRepository.save(reservation);
     }
 
+    /**
+     * 예약 확정: HELD → CONFIRMED
+     */
+    @Transactional
+    public Reservation confirm(Long reservationId) {
+        Reservation reservation = reservationRepository.findById(reservationId)
+                .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 예약입니다."));
+        reservation.confirm();
+        return reservationRepository.save(reservation);
+    }
+
+    /**
+     * 예약 조회
+     */
+    public Reservation findById(Long reservationId) {
+        return reservationRepository.findById(reservationId)
+                .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 예약입니다."));
+    }
+
+    /**
+     * 취소: 좌석 상태 복원 + Reservation CANCELLED + Redis 삭제 + Kafka 발행
+     */
     @Transactional
     public String cancel(Long seatId, Long userId) {
         try {
-            // 1. 좌석 조회
             Seat seat = seatRepository.findById(seatId)
                     .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 좌석입니다."));
 
-            // 2. 취소 실행 (여기서 IllegalStateException이 발생할 수 있음)
             seat.cancel();
 
-            // 3. Redis 삭제 및 Kafka 발행... (기존 로직)
+            // Reservation 상태를 CANCELLED로 업데이트 (존재하는 경우)
+            reservationRepository.findBySeatIdAndUserId(seatId, userId).ifPresent(reservation -> {
+                reservation.cancel();
+                reservationRepository.save(reservation);
+            });
+
             redisTemplate.delete("state:seat:" + seatId);
             reservationEventProducer.publish(ReservationEvent.cancelled(userId, seatId, seat.getSeatNumber()));
 
