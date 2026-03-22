@@ -9,6 +9,7 @@ import com.example.ticket.domain.reservation.ReservationService;
 import com.example.ticket.domain.seat.SeatRepository;
 import com.example.ticket.domain.seat.SeatStatus;
 import com.example.ticket.infrastructure.kafka.ReservationEventProducer;
+import com.example.ticket.infrastructure.redis.pubsub.SeatStatusPublisher;
 import com.example.ticket.infrastructure.redis.service.SeatCacheService;
 import com.example.ticket.infrastructure.redis.service.WaitingQueueService;
 import lombok.RequiredArgsConstructor;
@@ -34,6 +35,7 @@ public class PaymentFacade {
     private final SeatCacheService seatCacheService;
     private final WaitingQueueService waitingQueueService;
     private final ReservationEventProducer eventProducer;
+    private final SeatStatusPublisher seatStatusPublisher;
 
     /**
      * PG에 결제 요청 후 Payment(PENDING) 저장, transactionKey 반환
@@ -104,6 +106,7 @@ public class PaymentFacade {
             seatCacheService.updateSeatStatus(seatId, SeatStatus.CONFIRMED.name(), 0);
             eventProducer.publish(ReservationEvent.success(reservationId, userId, seatId, seatNumber));
             waitingQueueService.removeActiveUser(userId);
+            seatStatusPublisher.publish(seatId, seatNumber, "CONFIRMED");
 
             log.info("결제 성공 처리 완료. reservationId={}, transactionKey={}", reservationId, transactionKey);
 
@@ -114,6 +117,7 @@ public class PaymentFacade {
             seatCacheService.deleteSeatStatus(seatId);
             eventProducer.publish(ReservationEvent.failed(userId, seatId, seatNumber));
             waitingQueueService.removeActiveUser(userId);
+            seatStatusPublisher.publish(seatId, seatNumber, "AVAILABLE");
 
             log.info("결제 실패 처리 완료. reservationId={}, transactionKey={}", reservationId, transactionKey);
         }

@@ -5,6 +5,7 @@ import com.example.ticket.domain.reservation.ReservationService;
 import com.example.ticket.domain.seat.Seat;
 import com.example.ticket.domain.seat.SeatRepository;
 import com.example.ticket.domain.seat.SeatStatus;
+import com.example.ticket.infrastructure.redis.pubsub.SeatStatusPublisher;
 import com.example.ticket.infrastructure.redis.service.SeatCacheService;
 import com.example.ticket.infrastructure.redis.service.WaitingQueueService;
 import com.example.ticket.config.MetricsConfig;
@@ -28,6 +29,7 @@ public class ReservationFacade {
     private final WaitingQueueService waitingQueueService;
     private final SeatCacheService seatCacheService;
     private final MetricsConfig metricsConfig;
+    private final SeatStatusPublisher seatStatusPublisher;
 
     private static final String LOCK_KEY = "lock:seat:";
 
@@ -78,6 +80,9 @@ public class ReservationFacade {
 
                 // [STEP 6] DB에 HELD 상태 Reservation 저장
                 Reservation reservation = reservationService.hold(seatId, userId);
+
+                // [STEP 7] 좌석 선점 상태 브로드캐스트
+                seatStatusPublisher.publish(seatId, seat.getSeatNumber(), "SELECTED");
 
                 log.info("좌석 {} 선점 완료. reservationId={}, userId={}", seatId, reservation.getId(), userId);
 
