@@ -3,11 +3,14 @@ package com.example.ticket.application;
 import com.example.ticket.domain.event.ReservationEvent;
 import com.example.ticket.domain.payment.Payment;
 import com.example.ticket.domain.payment.PaymentRepository;
+import com.example.ticket.domain.payment.PaymentStatus;
 import com.example.ticket.domain.reservation.Reservation;
 import com.example.ticket.domain.reservation.ReservationStatus;
 import com.example.ticket.domain.reservation.ReservationService;
 import com.example.ticket.domain.seat.SeatRepository;
 import com.example.ticket.domain.seat.SeatStatus;
+import com.example.ticket.domain.user.User;
+import com.example.ticket.domain.user.UserRepository;
 import com.example.ticket.infrastructure.kafka.ReservationEventProducer;
 import com.example.ticket.infrastructure.redis.pubsub.SeatStatusPublisher;
 import com.example.ticket.infrastructure.redis.service.SeatCacheService;
@@ -40,6 +43,7 @@ public class PaymentFacade {
     private final WaitingQueueService waitingQueueService;
     private final ReservationEventProducer eventProducer;
     private final SeatStatusPublisher seatStatusPublisher;
+    private final UserRepository userRepository;
 
     @Value("${payment.callback-url}")
     private String callbackUrl;
@@ -61,16 +65,21 @@ public class PaymentFacade {
     /**
      * PG에 결제 요청 후 Payment(PENDING) 저장, transactionKey 반환
      */
-    @Transactional
-    public String requestPayment(Long reservationId, String cardType, String cardNo, Long amount, String userId) {
+    public String requestPayment(Long reservationId, String cardType, String cardNo, Long amount, String userEmail) {
         Reservation reservation = reservationService.findById(reservationId);
         if (reservation.getStatus() != ReservationStatus.HELD) {
             throw new IllegalStateException("결제 가능한 상태의 예약이 아닙니다. 현재 상태: " + reservation.getStatus());
         }
 
+        User user = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 사용자입니다."));
+        if (!reservation.getUserId().equals(user.getId())) {
+            throw new IllegalStateException("본인의 예약만 결제할 수 있습니다.");
+        }
+
         PgResponse pgResponse = pgWebClient.post()
                 .uri("/api/v1/payments")
-                .header("X-USER-ID", userId)
+                .header("X-USER-ID", String.valueOf(user.getId()))
                 .bodyValue(Map.of(
                         "orderId", "ORDER-" + reservationId,
                         "cardType", cardType,
@@ -100,6 +109,11 @@ public class PaymentFacade {
     public void handleCallback(String transactionKey, String status) {
         Payment payment = paymentRepository.findByTransactionKey(transactionKey)
                 .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 transactionKey: " + transactionKey));
+
+        if (payment.getStatus() != PaymentStatus.PENDING) {
+            log.warn("이미 처리된 콜백 - 멱등 처리. transactionKey={}, 상태={}", transactionKey, payment.getStatus());
+            return;
+        }
 
         Reservation reservation = reservationService.findById(payment.getReservationId());
         Long seatId = reservation.getSeatId();
