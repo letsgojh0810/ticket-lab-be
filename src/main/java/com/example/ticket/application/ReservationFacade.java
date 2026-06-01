@@ -6,6 +6,8 @@ import com.example.ticket.domain.reservation.ReservationService;
 import com.example.ticket.domain.seat.Seat;
 import com.example.ticket.domain.seat.SeatRepository;
 import com.example.ticket.domain.seat.SeatStatus;
+import com.example.ticket.domain.user.User;
+import com.example.ticket.domain.user.UserRepository;
 import com.example.ticket.infrastructure.kafka.ReservationEventProducer;
 import com.example.ticket.infrastructure.redis.pubsub.SeatStatusPublisher;
 import com.example.ticket.infrastructure.redis.service.SeatCacheService;
@@ -33,6 +35,7 @@ public class ReservationFacade {
     private final MetricsConfig metricsConfig;
     private final SeatStatusPublisher seatStatusPublisher;
     private final ReservationEventProducer reservationEventProducer;
+    private final UserRepository userRepository;
 
     private static final String LOCK_KEY = "lock:seat:";
 
@@ -117,10 +120,12 @@ public class ReservationFacade {
     /**
      * 예약 취소: 좌석 해제 + Redis 삭제 + Kafka 발행 + SSE 브로드캐스트
      */
-    public void cancel(Long seatId, Long userId) {
-        Seat seat = reservationService.cancel(seatId, userId);
+    public void cancel(Long seatId, String userEmail) {
+        User user = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 사용자입니다."));
+        Seat seat = reservationService.cancel(seatId, user.getId());
         seatCacheService.deleteSeatStatus(seatId);
-        reservationEventProducer.publish(ReservationEvent.cancelled(userId, seatId, seat.getSeatNumber()));
+        reservationEventProducer.publish(ReservationEvent.cancelled(user.getId(), seatId, seat.getSeatNumber()));
         seatStatusPublisher.publish(seatId, seat.getSeatNumber(), SeatStatus.AVAILABLE.name());
     }
 

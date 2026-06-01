@@ -5,6 +5,7 @@ import com.example.ticket.interfaces.dto.ReservationRequest;
 import com.example.ticket.interfaces.dto.ReservationResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -24,8 +25,10 @@ public class ReservationController {
     }
 
     @PostMapping("/cancel")
-    public ResponseEntity<ReservationResponse> cancel(@RequestBody ReservationRequest request) {
-        reservationFacade.cancel(request.getSeatId(), request.getUserId());
+    public ResponseEntity<ReservationResponse> cancel(
+            @RequestBody ReservationRequest request,
+            Authentication authentication) {
+        reservationFacade.cancel(request.getSeatId(), authentication.getName());
         return ResponseEntity.ok(ReservationResponse.ok("취소가 완료되었습니다."));
     }
 }

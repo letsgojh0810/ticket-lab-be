@@ -29,14 +29,14 @@ public class PaymentController {
     @PostMapping("/request")
     public ResponseEntity<PaymentResponse> requestPayment(@RequestBody PaymentRequest request) {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-        String userId = authentication.getName(); // email or username
+        String userEmail = authentication.getName(); // email or username
 
         String transactionKey = paymentFacade.requestPayment(
                 request.getReservationId(),
                 request.getCardType(),
                 request.getCardNo(),
                 request.getAmount(),
-                userId
+                userEmail
         );
 
         return ResponseEntity.ok(new PaymentResponse(transactionKey));

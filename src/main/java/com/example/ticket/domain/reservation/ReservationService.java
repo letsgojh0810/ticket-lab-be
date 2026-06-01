@@ -67,14 +67,17 @@ public class ReservationService {
      */
     @Transactional
     public Seat cancel(Long seatId, Long userId) {
+        Reservation reservation = reservationRepository.findBySeatIdAndUserId(seatId, userId)
+                .orElseThrow(() -> new IllegalArgumentException("취소할 예약을 찾을 수 없습니다."));
+        if (reservation.getStatus() != ReservationStatus.HELD) {
+            throw new IllegalStateException("HELD 상태의 예약만 취소할 수 있습니다. 현재 상태: " + reservation.getStatus());
+        }
+        reservation.cancel();
+        reservationRepository.save(reservation);
+
         Seat seat = seatRepository.findById(seatId)
                 .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 좌석입니다."));
         seat.release();
-
-        reservationRepository.findBySeatIdAndUserId(seatId, userId).ifPresent(reservation -> {
-            reservation.cancel();
-            reservationRepository.save(reservation);
-        });
 
         return seat;
     }
