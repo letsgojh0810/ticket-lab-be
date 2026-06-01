@@ -60,12 +60,12 @@ public class ReservationFacade {
             // [STEP 3] 분산 락 획득 (1초 대기, 2초 점유)
             Timer.Sample lockSample = Timer.start();
             if (!lock.tryLock(1, 2, TimeUnit.SECONDS)) {
-                lockSample.stop(metricsConfig.getLockAcquisitionTimer());
-                metricsConfig.getLockTimeoutCounter().increment();
-                metricsConfig.getReservationFailedCounter().increment();
+                metricsConfig.stopLockAcquisitionTimer(lockSample);
+                metricsConfig.recordLockTimeout();
+                metricsConfig.recordReservationFailure();
                 throw new IllegalStateException("현재 접속자가 많아 처리에 실패했습니다. 잠시 후 다시 시도해 주세요.");
             }
-            lockSample.stop(metricsConfig.getLockAcquisitionTimer());
+            metricsConfig.stopLockAcquisitionTimer(lockSample);
 
             try {
                 // [STEP 4] 락 획득 후 DB에서 최신 좌석 상태 확인 (DB가 원천)
@@ -86,7 +86,7 @@ public class ReservationFacade {
                 // [STEP 7] 좌석 선점 상태 브로드캐스트
                 seatStatusPublisher.publish(seatId, seat.getSeatNumber(), SeatStatus.SELECTED.name());
                 log.info("좌석 {} 선점 완료. reservationId={}, userId={}", seatId, reservation.getId(), userId);
-                reservationSample.stop(metricsConfig.getReservationTimer());
+                metricsConfig.stopReservationTimer(reservationSample);
 
                 return reservation.getId();
 
@@ -98,16 +98,16 @@ public class ReservationFacade {
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            metricsConfig.getReservationFailedCounter().increment();
+            metricsConfig.recordReservationFailure();
             throw new IllegalStateException("시스템 오류가 발생했습니다.");
         } catch (IllegalStateException e) {
-            metricsConfig.getReservationFailedCounter().increment();
+            metricsConfig.recordReservationFailure();
             throw e;
         } catch (IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {
             log.error("예약 과정 중 에러 발생: ", e);
-            metricsConfig.getReservationFailedCounter().increment();
+            metricsConfig.recordReservationFailure();
             throw new IllegalStateException(e.getMessage());
         } finally {
             metricsConfig.decrementActiveReservations();
