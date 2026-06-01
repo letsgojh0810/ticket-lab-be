@@ -59,16 +59,4 @@ public class ReservationEvent {
         );
     }
 
-    // JSON 문자열로 변환 (Kafka 전송용)
-    public String toJson() {
-        return String.format(
-                "{\"reservationId\":%s,\"userId\":%d,\"seatId\":%d,\"seatNumber\":\"%s\",\"reservedAt\":\"%s\",\"eventType\":\"%s\"}",
-                reservationId != null ? reservationId : "null",
-                userId,
-                seatId,
-                seatNumber,
-                reservedAt,
-                eventType
-        );
-    }
 }

@@ -12,9 +12,13 @@ import com.example.ticket.infrastructure.kafka.ReservationEventProducer;
 import com.example.ticket.infrastructure.redis.pubsub.SeatStatusPublisher;
 import com.example.ticket.infrastructure.redis.service.SeatCacheService;
 import com.example.ticket.infrastructure.redis.service.WaitingQueueService;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -37,19 +41,34 @@ public class PaymentFacade {
     private final ReservationEventProducer eventProducer;
     private final SeatStatusPublisher seatStatusPublisher;
 
+    @Value("${payment.callback-url}")
+    private String callbackUrl;
+
+    @Getter
+    @NoArgsConstructor
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    static class PgResponse {
+        private PgData data;
+
+        @Getter
+        @NoArgsConstructor
+        @JsonIgnoreProperties(ignoreUnknown = true)
+        static class PgData {
+            private String transactionKey;
+        }
+    }
+
     /**
      * PG에 결제 요청 후 Payment(PENDING) 저장, transactionKey 반환
      */
     @Transactional
     public String requestPayment(Long reservationId, String cardType, String cardNo, Long amount, String userId) {
-        // 1. Reservation 조회 및 HELD 상태 확인
         Reservation reservation = reservationService.findById(reservationId);
         if (reservation.getStatus() != ReservationStatus.HELD) {
             throw new IllegalStateException("결제 가능한 상태의 예약이 아닙니다. 현재 상태: " + reservation.getStatus());
         }
 
-        // 2. PG 호출 (동기)
-        Map<?, ?> pgResponse = pgWebClient.post()
+        PgResponse pgResponse = pgWebClient.post()
                 .uri("/api/v1/payments")
                 .header("X-USER-ID", userId)
                 .bodyValue(Map.of(
@@ -57,24 +76,18 @@ public class PaymentFacade {
                         "cardType", cardType,
                         "cardNo", cardNo,
                         "amount", amount,
-                        "callbackUrl", "http://localhost:8080/api/v1/payments/callback"
+                        "callbackUrl", callbackUrl
                 ))
                 .retrieve()
-                .bodyToMono(Map.class)
+                .bodyToMono(PgResponse.class)
                 .block();
 
-        // PG 응답 구조: { "meta": {...}, "data": { "transactionKey": "...", ... } }
-        if (pgResponse == null || !pgResponse.containsKey("data")) {
+        if (pgResponse == null || pgResponse.getData() == null || pgResponse.getData().getTransactionKey() == null) {
             throw new IllegalStateException("PG 응답이 올바르지 않습니다.");
         }
 
-        @SuppressWarnings("unchecked")
-        java.util.Map<String, Object> data = (java.util.Map<String, Object>) pgResponse.get("data");
-        String transactionKey = (String) data.get("transactionKey");
-
-        // 3. Payment PENDING 저장
-        Payment payment = Payment.create(reservationId, transactionKey, amount, cardType, cardNo);
-        paymentRepository.save(payment);
+        String transactionKey = pgResponse.getData().getTransactionKey();
+        paymentRepository.save(Payment.create(reservationId, transactionKey, amount, cardType, cardNo));
 
         log.info("결제 요청 완료. reservationId={}, transactionKey={}", reservationId, transactionKey);
         return transactionKey;
@@ -85,42 +98,41 @@ public class PaymentFacade {
      */
     @Transactional
     public void handleCallback(String transactionKey, String status) {
-        // 1. Payment 조회
         Payment payment = paymentRepository.findByTransactionKey(transactionKey)
                 .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 transactionKey: " + transactionKey));
 
-        Long reservationId = payment.getReservationId();
-        Reservation reservation = reservationService.findById(reservationId);
+        Reservation reservation = reservationService.findById(payment.getReservationId());
         Long seatId = reservation.getSeatId();
         Long userId = reservation.getUserId();
-
-        // 좌석 정보 조회 (이벤트 발행용)
         String seatNumber = seatRepository.findById(seatId)
                 .map(seat -> seat.getSeatNumber())
                 .orElse("UNKNOWN");
 
         if ("SUCCESS".equalsIgnoreCase(status)) {
-            // 2-A. 결제 성공
-            payment.success();
-            reservationService.confirm(reservationId);
-            seatCacheService.updateSeatStatus(seatId, SeatStatus.CONFIRMED.name(), 0);
-            eventProducer.publish(ReservationEvent.success(reservationId, userId, seatId, seatNumber));
-            waitingQueueService.removeActiveUser(userId);
-            seatStatusPublisher.publish(seatId, seatNumber, "CONFIRMED");
-
-            log.info("결제 성공 처리 완료. reservationId={}, transactionKey={}", reservationId, transactionKey);
-
+            onPaymentSuccess(payment, reservation, seatId, userId, seatNumber);
         } else {
-            // 2-B. 결제 실패
-            payment.fail();
-            reservation.cancel();
-            reservationService.releaseSeat(seatId); // DB 상태를 AVAILABLE로 복원
-            seatCacheService.deleteSeatStatus(seatId);
-            eventProducer.publish(ReservationEvent.failed(userId, seatId, seatNumber));
-            waitingQueueService.removeActiveUser(userId);
-            seatStatusPublisher.publish(seatId, seatNumber, "AVAILABLE");
-
-            log.info("결제 실패 처리 완료. reservationId={}, transactionKey={}", reservationId, transactionKey);
+            onPaymentFailure(payment, reservation, seatId, userId, seatNumber);
         }
+    }
+
+    private void onPaymentSuccess(Payment payment, Reservation reservation, Long seatId, Long userId, String seatNumber) {
+        payment.success();
+        reservationService.confirm(reservation.getId());
+        seatCacheService.updateSeatStatus(seatId, SeatStatus.CONFIRMED.name(), 0);
+        eventProducer.publish(ReservationEvent.success(reservation.getId(), userId, seatId, seatNumber));
+        waitingQueueService.removeActiveUser(userId);
+        seatStatusPublisher.publish(seatId, seatNumber, SeatStatus.CONFIRMED.name());
+        log.info("결제 성공 처리 완료. reservationId={}", reservation.getId());
+    }
+
+    private void onPaymentFailure(Payment payment, Reservation reservation, Long seatId, Long userId, String seatNumber) {
+        payment.fail();
+        reservation.cancel();
+        reservationService.releaseSeat(seatId);
+        seatCacheService.deleteSeatStatus(seatId);
+        eventProducer.publish(ReservationEvent.failed(userId, seatId, seatNumber));
+        waitingQueueService.removeActiveUser(userId);
+        seatStatusPublisher.publish(seatId, seatNumber, SeatStatus.AVAILABLE.name());
+        log.info("결제 실패 처리 완료. reservationId={}", reservation.getId());
     }
 }

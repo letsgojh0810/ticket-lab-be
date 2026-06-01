@@ -2,6 +2,7 @@ package com.example.ticket.application;
 
 import com.example.ticket.domain.seat.Seat;
 import com.example.ticket.domain.seat.SeatRepository;
+import com.example.ticket.domain.seat.SeatStatus;
 import com.example.ticket.interfaces.dto.SeatResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -49,7 +50,7 @@ public class SeatQueryService {
      */
     public List<SeatResponse> getAvailableSeats() {
         return getAllSeats().stream()
-                .filter(s -> "AVAILABLE".equals(s.getStatus()))
+                .filter(s -> SeatStatus.AVAILABLE.name().equals(s.getStatus()))
                 .toList();
     }
 }

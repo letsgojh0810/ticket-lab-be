@@ -4,14 +4,12 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
-import lombok.Getter;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Component
-@Getter
 public class MetricsConfig {
 
     private final Counter reservationSuccessCounter;
@@ -82,5 +80,21 @@ public class MetricsConfig {
 
     public void decrementActiveReservations() {
         activeReservations.decrementAndGet();
+    }
+
+    public void recordReservationFailure() {
+        reservationFailedCounter.increment();
+    }
+
+    public void recordLockTimeout() {
+        lockTimeoutCounter.increment();
+    }
+
+    public void stopReservationTimer(Timer.Sample sample) {
+        sample.stop(reservationTimer);
+    }
+
+    public void stopLockAcquisitionTimer(Timer.Sample sample) {
+        sample.stop(lockAcquisitionTimer);
     }
 }
