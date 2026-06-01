@@ -1,10 +1,12 @@
 package com.example.ticket.application;
 
+import com.example.ticket.domain.event.ReservationEvent;
 import com.example.ticket.domain.reservation.Reservation;
 import com.example.ticket.domain.reservation.ReservationService;
 import com.example.ticket.domain.seat.Seat;
 import com.example.ticket.domain.seat.SeatRepository;
 import com.example.ticket.domain.seat.SeatStatus;
+import com.example.ticket.infrastructure.kafka.ReservationEventProducer;
 import com.example.ticket.infrastructure.redis.pubsub.SeatStatusPublisher;
 import com.example.ticket.infrastructure.redis.service.SeatCacheService;
 import com.example.ticket.infrastructure.redis.service.WaitingQueueService;
@@ -30,6 +32,7 @@ public class ReservationFacade {
     private final SeatCacheService seatCacheService;
     private final MetricsConfig metricsConfig;
     private final SeatStatusPublisher seatStatusPublisher;
+    private final ReservationEventProducer reservationEventProducer;
 
     private static final String LOCK_KEY = "lock:seat:";
 
@@ -42,29 +45,24 @@ public class ReservationFacade {
         Timer.Sample reservationSample = Timer.start();
         metricsConfig.incrementActiveReservations();
 
-        // [STEP 1] Active User 확인 (대기열을 통과한 사용자만 예약 가능)
-        if (!waitingQueueService.isAllowed(userId)) {
-            metricsConfig.decrementActiveReservations();
-            throw new IllegalStateException("대기열 진입이 필요합니다. /api/v1/queue/enter를 먼저 호출하세요.");
-        }
-
-        // [STEP 2] 좌석 존재 여부 사전 확인
-        seatRepository.findById(seatId)
-                .orElseThrow(() -> {
-                    metricsConfig.decrementActiveReservations();
-                    return new IllegalArgumentException("존재하지 않는 좌석입니다.");
-                });
-
-        RLock lock = redissonClient.getLock(LOCK_KEY + seatId);
-
         try {
+            // [STEP 1] Active User 확인 (대기열을 통과한 사용자만 예약 가능)
+            if (!waitingQueueService.isAllowed(userId)) {
+                throw new IllegalStateException("대기열 진입이 필요합니다. /api/v1/queue/enter를 먼저 호출하세요.");
+            }
+
+            // [STEP 2] 좌석 존재 여부 사전 확인
+            seatRepository.findById(seatId)
+                    .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 좌석입니다."));
+
+            RLock lock = redissonClient.getLock(LOCK_KEY + seatId);
+
             // [STEP 3] 분산 락 획득 (1초 대기, 2초 점유)
             Timer.Sample lockSample = Timer.start();
             if (!lock.tryLock(1, 2, TimeUnit.SECONDS)) {
                 lockSample.stop(metricsConfig.getLockAcquisitionTimer());
                 metricsConfig.getLockTimeoutCounter().increment();
                 metricsConfig.getReservationFailedCounter().increment();
-                metricsConfig.decrementActiveReservations();
                 throw new IllegalStateException("현재 접속자가 많아 처리에 실패했습니다. 잠시 후 다시 시도해 주세요.");
             }
             lockSample.stop(metricsConfig.getLockAcquisitionTimer());
@@ -73,13 +71,7 @@ public class ReservationFacade {
                 // [STEP 4] 락 획득 후 DB에서 최신 좌석 상태 확인 (DB가 원천)
                 Seat seat = seatRepository.findById(seatId)
                         .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 좌석입니다."));
-
-                if (seat.getStatus() == SeatStatus.SELECTED) {
-                    throw new IllegalStateException("현재 다른 사용자가 결제 진행 중입니다.");
-                }
-                if (seat.getStatus() == SeatStatus.CONFIRMED) {
-                    throw new IllegalStateException("이미 판매가 완료된 좌석입니다.");
-                }
+                validateSeatNotTaken(seat);
 
                 // [STEP 5] DB 상태 변경 (AVAILABLE → SELECTED) + Reservation HELD 저장
                 Reservation reservation = reservationService.hold(seatId, userId);
@@ -92,11 +84,8 @@ public class ReservationFacade {
                 }
 
                 // [STEP 7] 좌석 선점 상태 브로드캐스트
-                seatStatusPublisher.publish(seatId, seat.getSeatNumber(), "SELECTED");
-
+                seatStatusPublisher.publish(seatId, seat.getSeatNumber(), SeatStatus.SELECTED.name());
                 log.info("좌석 {} 선점 완료. reservationId={}, userId={}", seatId, reservation.getId(), userId);
-
-                metricsConfig.decrementActiveReservations();
                 reservationSample.stop(metricsConfig.getReservationTimer());
 
                 return reservation.getId();
@@ -110,17 +99,37 @@ public class ReservationFacade {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             metricsConfig.getReservationFailedCounter().increment();
-            metricsConfig.decrementActiveReservations();
             throw new IllegalStateException("시스템 오류가 발생했습니다.");
         } catch (IllegalStateException e) {
             metricsConfig.getReservationFailedCounter().increment();
-            metricsConfig.decrementActiveReservations();
+            throw e;
+        } catch (IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {
             log.error("예약 과정 중 에러 발생: ", e);
             metricsConfig.getReservationFailedCounter().increment();
-            metricsConfig.decrementActiveReservations();
             throw new IllegalStateException(e.getMessage());
+        } finally {
+            metricsConfig.decrementActiveReservations();
+        }
+    }
+
+    /**
+     * 예약 취소: 좌석 해제 + Redis 삭제 + Kafka 발행 + SSE 브로드캐스트
+     */
+    public void cancel(Long seatId, Long userId) {
+        Seat seat = reservationService.cancel(seatId, userId);
+        seatCacheService.deleteSeatStatus(seatId);
+        reservationEventProducer.publish(ReservationEvent.cancelled(userId, seatId, seat.getSeatNumber()));
+        seatStatusPublisher.publish(seatId, seat.getSeatNumber(), SeatStatus.AVAILABLE.name());
+    }
+
+    private void validateSeatNotTaken(Seat seat) {
+        if (seat.getStatus() == SeatStatus.SELECTED) {
+            throw new IllegalStateException("현재 다른 사용자가 결제 진행 중입니다.");
+        }
+        if (seat.getStatus() == SeatStatus.CONFIRMED) {
+            throw new IllegalStateException("이미 판매가 완료된 좌석입니다.");
         }
     }
 }
