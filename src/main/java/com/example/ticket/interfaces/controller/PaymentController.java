@@ -4,6 +4,7 @@ import com.example.ticket.application.PaymentFacade;
 import com.example.ticket.interfaces.dto.PaymentCallbackRequest;
 import com.example.ticket.interfaces.dto.PaymentRequest;
 import com.example.ticket.interfaces.dto.PaymentResponse;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -27,7 +28,7 @@ public class PaymentController {
      * POST /api/v1/payments/request
      */
     @PostMapping("/request")
-    public ResponseEntity<PaymentResponse> requestPayment(@RequestBody PaymentRequest request) {
+    public ResponseEntity<PaymentResponse> requestPayment(@Valid @RequestBody PaymentRequest request) {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String userEmail = authentication.getName(); // email or username
 
@@ -47,7 +48,7 @@ public class PaymentController {
      * POST /api/v1/payments/callback
      */
     @PostMapping("/callback")
-    public ResponseEntity<Void> handleCallback(@RequestBody PaymentCallbackRequest request) {
+    public ResponseEntity<Void> handleCallback(@Valid @RequestBody PaymentCallbackRequest request) {
         log.info("PG 콜백 수신. transactionKey={}, status={}", request.getTransactionKey(), request.getStatus());
         paymentFacade.handleCallback(request.getTransactionKey(), request.getStatus());
         return ResponseEntity.ok().build();

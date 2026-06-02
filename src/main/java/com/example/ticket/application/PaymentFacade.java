@@ -1,6 +1,5 @@
 package com.example.ticket.application;
 
-import com.example.ticket.domain.event.ReservationEvent;
 import com.example.ticket.domain.payment.Payment;
 import com.example.ticket.domain.payment.PaymentRepository;
 import com.example.ticket.domain.payment.PaymentStatus;
@@ -11,10 +10,7 @@ import com.example.ticket.domain.seat.SeatRepository;
 import com.example.ticket.domain.seat.SeatStatus;
 import com.example.ticket.domain.user.User;
 import com.example.ticket.domain.user.UserRepository;
-import com.example.ticket.infrastructure.kafka.ReservationEventProducer;
-import com.example.ticket.infrastructure.redis.pubsub.SeatStatusPublisher;
 import com.example.ticket.infrastructure.redis.service.SeatCacheService;
-import com.example.ticket.infrastructure.redis.service.WaitingQueueService;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -22,6 +18,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -40,10 +37,8 @@ public class PaymentFacade {
     private final ReservationService reservationService;
     private final SeatRepository seatRepository;
     private final SeatCacheService seatCacheService;
-    private final WaitingQueueService waitingQueueService;
-    private final ReservationEventProducer eventProducer;
-    private final SeatStatusPublisher seatStatusPublisher;
     private final UserRepository userRepository;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Value("${payment.callback-url}")
     private String callbackUrl;
@@ -122,31 +117,29 @@ public class PaymentFacade {
                 .map(seat -> seat.getSeatNumber())
                 .orElse("UNKNOWN");
 
-        if ("SUCCESS".equalsIgnoreCase(status)) {
-            onPaymentSuccess(payment, reservation, seatId, userId, seatNumber);
+        boolean success = "SUCCESS".equalsIgnoreCase(status);
+        if (success) {
+            onPaymentSuccess(payment, reservation, seatId);
         } else {
-            onPaymentFailure(payment, reservation, seatId, userId, seatNumber);
+            onPaymentFailure(payment, reservation, seatId);
         }
+
+        // DB 커밋 후 Kafka/SSE/큐 후처리 — PaymentEventListener가 AFTER_COMMIT에 처리
+        eventPublisher.publishEvent(new PaymentResultEvent(success, reservation.getId(), userId, seatId, seatNumber));
     }
 
-    private void onPaymentSuccess(Payment payment, Reservation reservation, Long seatId, Long userId, String seatNumber) {
+    private void onPaymentSuccess(Payment payment, Reservation reservation, Long seatId) {
         payment.success();
         reservationService.confirm(reservation.getId());
         seatCacheService.updateSeatStatus(seatId, SeatStatus.CONFIRMED.name(), 0);
-        eventProducer.publish(ReservationEvent.success(reservation.getId(), userId, seatId, seatNumber));
-        waitingQueueService.removeActiveUser(userId);
-        seatStatusPublisher.publish(seatId, seatNumber, SeatStatus.CONFIRMED.name());
-        log.info("결제 성공 처리 완료. reservationId={}", reservation.getId());
+        log.info("결제 성공 DB 처리 완료. reservationId={}", reservation.getId());
     }
 
-    private void onPaymentFailure(Payment payment, Reservation reservation, Long seatId, Long userId, String seatNumber) {
+    private void onPaymentFailure(Payment payment, Reservation reservation, Long seatId) {
         payment.fail();
         reservation.cancel();
         reservationService.releaseSeat(seatId);
         seatCacheService.deleteSeatStatus(seatId);
-        eventProducer.publish(ReservationEvent.failed(userId, seatId, seatNumber));
-        waitingQueueService.removeActiveUser(userId);
-        seatStatusPublisher.publish(seatId, seatNumber, SeatStatus.AVAILABLE.name());
-        log.info("결제 실패 처리 완료. reservationId={}", reservation.getId());
+        log.info("결제 실패 DB 처리 완료. reservationId={}", reservation.getId());
     }
 }

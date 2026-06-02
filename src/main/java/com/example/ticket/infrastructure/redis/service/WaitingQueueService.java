@@ -5,7 +5,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
-import java.util.Set;
+import org.springframework.data.redis.core.Cursor;
+import org.springframework.data.redis.core.ScanOptions;
+
 import java.util.concurrent.TimeUnit;
 
 @Service
@@ -47,9 +49,19 @@ public class WaitingQueueService {
         log.debug("🔴 Active User 제거: userId={}", userId);
     }
 
-    // 현재 Active User 수 조회 (모니터링용)
+    // 현재 Active User 수 조회 (모니터링용) — SCAN으로 블로킹 방지
     public Long getActiveUserCount() {
-        Set<String> keys = redisTemplate.keys(ACTIVE_KEY_PREFIX + "*");
-        return keys != null ? (long) keys.size() : 0L;
+        ScanOptions options = ScanOptions.scanOptions()
+                .match(ACTIVE_KEY_PREFIX + "*")
+                .count(100)
+                .build();
+        long count = 0;
+        try (Cursor<String> cursor = redisTemplate.scan(options)) {
+            while (cursor.hasNext()) {
+                cursor.next();
+                count++;
+            }
+        }
+        return count;
     }
 }
