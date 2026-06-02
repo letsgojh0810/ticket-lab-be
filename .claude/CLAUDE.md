@@ -118,6 +118,11 @@ config/             # Spring configuration beans (Redis, Redisson, Kafka)
   - Analytics and data warehousing
   - Audit logging
 
+**6. Transactional Event Listener Pattern**
+- `PaymentFacade.handleCallback()` publishes a Spring `PaymentResultEvent` (via `ApplicationEventPublisher`) inside `@Transactional`
+- `PaymentEventListener` is annotated with `@TransactionalEventListener(phase = AFTER_COMMIT)` — Kafka publish, SSE broadcast, and queue removal happen **only after DB commits successfully**
+- This prevents ghost events: if the transaction rolls back, the listener is never invoked
+
 ### Two-Phase Reservation Flow
 
 **Phase 1 — Seat Hold (`ReservationFacade.reserve()`)**
@@ -135,8 +140,10 @@ config/             # Spring configuration beans (Redis, Redisson, Kafka)
 3. Save `Payment` as `PENDING`; return `transactionKey`
 
 **Phase 3 — PG Callback (`PaymentFacade.handleCallback()`)**
-- **SUCCESS**: `Payment.success()`, `Reservation` → `CONFIRMED`, `Seat` → `CONFIRMED`, publish Kafka `RESERVATION_SUCCESS`, remove active queue user, broadcast `CONFIRMED` via SSE
-- **FAILURE**: `Payment.fail()`, `Reservation.cancel()`, `Seat` → `AVAILABLE`, delete Redis cache, publish Kafka `RESERVATION_FAILED`, broadcast `AVAILABLE` via SSE
+- Runs inside `@Transactional`
+- **SUCCESS (DB)**: `Payment.success()`, `Reservation` → `CONFIRMED`, `Seat` → `CONFIRMED`, update Redis cache
+- **FAILURE (DB)**: `Payment.fail()`, `Reservation.cancel()`, `Seat` → `AVAILABLE`, delete Redis cache
+- **After commit (`PaymentEventListener`)**: Kafka publish + queue removal + SSE broadcast (via `@TransactionalEventListener(AFTER_COMMIT)`)
 
 ### Status Enums
 
@@ -220,6 +227,11 @@ JWT-based stateless auth with Spring Security:
 
 **Validation:**
 - All controller DTOs must use `@Valid` for input validation
+- DTO fields must declare `@NotNull` / `@NotBlank` / `@Positive` constraints — `@Valid` alone does nothing without field-level annotations
+
+**Redis:**
+- Never use `redisTemplate.keys(pattern)` in production code — it is O(N) and blocks the entire Redis event loop
+- Use `redisTemplate.scan(ScanOptions)` instead (iterates in chunks of ~100, non-blocking)
 
 ## Key Implementation Files
 
@@ -245,10 +257,9 @@ JWT-based stateless auth with Spring Security:
 
 ### Kafka Integration Points
 
-Events are published from two facades:
-- `ReservationFacade`: lock timeout or exception → `RESERVATION_FAILED`
-- `PaymentFacade.handleCallback()`: payment success → `RESERVATION_SUCCESS`; payment failure → `RESERVATION_FAILED`
-- `ReservationService.cancel()`: cancellation → `RESERVATION_CANCELLED`
+- `ReservationFacade`: lock timeout or exception → `RESERVATION_FAILED` (published inline, no transaction)
+- `PaymentFacade.handleCallback()` → publishes `PaymentResultEvent` → `PaymentEventListener` (AFTER_COMMIT) → `RESERVATION_SUCCESS` or `RESERVATION_FAILED`
+- `ReservationFacade.cancel()` → `RESERVATION_CANCELLED` (published after inner `@Transactional` completes)
 
 ## API Endpoints
 
