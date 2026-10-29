@@ -90,6 +90,7 @@ public class ReservationFacade {
                 seatStatusPublisher.publish(seatId, seat.getSeatNumber(), SeatStatus.SELECTED.name());
                 log.info("좌석 {} 선점 완료. reservationId={}, userId={}", seatId, reservation.getId(), userId);
                 metricsConfig.stopReservationTimer(reservationSample);
+                metricsConfig.recordReservationSuccess();
 
                 return reservation.getId();
 
