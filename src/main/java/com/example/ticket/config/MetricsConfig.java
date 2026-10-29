@@ -82,8 +82,20 @@ public class MetricsConfig {
         activeReservations.decrementAndGet();
     }
 
+    public void recordReservationSuccess() {
+        reservationSuccessCounter.increment();
+    }
+
     public void recordReservationFailure() {
         reservationFailedCounter.increment();
+    }
+
+    public void recordPaymentSuccess() {
+        paymentSuccessCounter.increment();
+    }
+
+    public void recordPaymentFailure() {
+        paymentFailedCounter.increment();
     }
 
     public void recordLockTimeout() {

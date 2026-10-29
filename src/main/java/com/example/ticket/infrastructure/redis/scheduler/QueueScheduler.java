@@ -16,11 +16,13 @@ public class QueueScheduler {
     private final RedisTemplate<String, String> redisTemplate;
     private final WaitingQueueService waitingQueueService;
     private static final String QUEUE_KEY = "ticket:waiting:queue";
-    private static final int MAX_ACTIVE_USERS = 200; // 최대 동시 처리 가능 인원
+    private static final int MAX_ACTIVE_USERS = 500; // 최대 동시 처리 가능 인원
 
     @Scheduled(fixedDelay = 1000) // 1초마다 실행
     public void moveWaitingToActive() {
-        // 현재 Active User 수 확인 (개별 키 카운트)
+        waitingQueueService.purgeExpiredActiveUsers();
+
+        // 현재 Active User 수 확인 (만료 시각 ZSET 카운트)
         Long currentActive = waitingQueueService.getActiveUserCount();
 
         // 빈 자리 계산

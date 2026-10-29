@@ -1,5 +1,6 @@
 package com.example.ticket.application;
 
+import com.example.ticket.config.MetricsConfig;
 import com.example.ticket.domain.event.ReservationEvent;
 import com.example.ticket.domain.seat.SeatStatus;
 import com.example.ticket.infrastructure.kafka.ReservationEventProducer;
@@ -19,16 +20,19 @@ public class PaymentEventListener {
     private final ReservationEventProducer eventProducer;
     private final SeatStatusPublisher seatStatusPublisher;
     private final WaitingQueueService waitingQueueService;
+    private final MetricsConfig metricsConfig;
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void onPaymentResult(PaymentResultEvent event) {
         if (event.success()) {
+            metricsConfig.recordPaymentSuccess();
             eventProducer.publish(ReservationEvent.success(
                     event.reservationId(), event.userId(), event.seatId(), event.seatNumber()));
             waitingQueueService.removeActiveUser(event.userId());
             seatStatusPublisher.publish(event.seatId(), event.seatNumber(), SeatStatus.CONFIRMED.name());
             log.info("결제 성공 후처리 완료. reservationId={}", event.reservationId());
         } else {
+            metricsConfig.recordPaymentFailure();
             eventProducer.publish(ReservationEvent.failed(event.userId(), event.seatId(), event.seatNumber()));
             waitingQueueService.removeActiveUser(event.userId());
             seatStatusPublisher.publish(event.seatId(), event.seatNumber(), SeatStatus.AVAILABLE.name());

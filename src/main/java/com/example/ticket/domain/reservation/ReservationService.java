@@ -28,6 +28,24 @@ public class ReservationService {
     }
 
     /**
+     * 결제 없이 TTL이 지난 HELD 예약 만료: Reservation CANCELLED + Seat AVAILABLE 복원
+     * 그 사이 확정/취소된 예약이면 null 반환
+     */
+    @Transactional
+    public Seat expireHeld(Long reservationId) {
+        Reservation reservation = reservationRepository.findById(reservationId)
+                .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 예약입니다."));
+        if (reservation.getStatus() != ReservationStatus.HELD) {
+            return null;
+        }
+        reservation.cancel();
+        Seat seat = seatRepository.findById(reservation.getSeatId())
+                .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 좌석입니다."));
+        seat.release();
+        return seat;
+    }
+
+    /**
      * 예약 확정: HELD → CONFIRMED, Seat SELECTED → CONFIRMED
      */
     @Transactional
